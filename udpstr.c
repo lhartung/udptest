@@ -11,6 +11,12 @@
 
 #define PACKET_BUFFER_LEN 2048
 
+struct packet_info {
+    uint32_t    seq;
+    uint32_t    sent_sec;
+    uint32_t    sent_usec;
+} __attribute__((__packed__));
+
 const char *OPTSTRING = "SCr:h";
 
 const struct option LONGOPTS[] = {
@@ -156,6 +162,8 @@ int server_main()
     int sockfd;
     struct addrinfo *addrinfo;
     char *buffer;
+    int buffer_len = packet_length > PACKET_BUFFER_LEN ?
+        packet_length : PACKET_BUFFER_LEN;
 
     snprintf(port_str, sizeof(port_str), "%d", server_port);
 
@@ -184,7 +192,7 @@ int server_main()
         exit(EXIT_FAILURE);
     }
 
-    buffer = malloc(PACKET_BUFFER_LEN);
+    buffer = malloc(buffer_len);
     if(!buffer) {
         fprintf(stderr, "Out of memory.\n");
         exit(EXIT_FAILURE);
@@ -194,13 +202,21 @@ int server_main()
         struct sockaddr_storage from_addr;
         socklen_t from_addr_len = sizeof(from_addr);
 
-        result = recvfrom(sockfd, buffer, PACKET_BUFFER_LEN, 0, 
+        result = recvfrom(sockfd, buffer, buffer_len, 0, 
                 (struct sockaddr *)&from_addr, &from_addr_len);
         if(result < 0) {
             perror("recvfrom");
             exit(EXIT_FAILURE);
         } else {
-            printf("Received %d bytes.\n", result);
+            struct packet_info *info = (struct packet_info *)buffer;
+            struct timeval received;
+
+            gettimeofday(&received, NULL);
+
+            printf("%9d.%06d %6u %6u %9d.%06d\n",
+                    received.tv_sec, received.tv_usec,
+                    result, ntohl(info->seq),
+                    ntohl(info->sent_sec), ntohl(info->sent_usec));
         }
     }
 
@@ -218,6 +234,7 @@ int client_main()
     struct addrinfo *addrinfo;
     char *buffer;
     long spacing;
+    uint32_t next_seq = 0;
 
     snprintf(port_str, sizeof(port_str), "%d", server_port);
 
@@ -240,7 +257,7 @@ int client_main()
         exit(EXIT_FAILURE);
     }
 
-    buffer = malloc(PACKET_BUFFER_LEN);
+    buffer = malloc(packet_length);
     if(!buffer) {
         fprintf(stderr, "Out of memory.\n");
         exit(EXIT_FAILURE);
@@ -255,6 +272,11 @@ int client_main()
         long delay = spacing;
 
         gettimeofday(&start, NULL);
+
+        struct packet_info *info = (struct packet_info *)buffer;
+        info->seq = htonl(next_seq++);
+        info->sent_sec = htonl(start.tv_sec);
+        info->sent_usec = htonl(start.tv_usec);
 
         result = sendto(sockfd, buffer, packet_length, 0,
                 addrinfo->ai_addr, addrinfo->ai_addrlen);
