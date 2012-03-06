@@ -103,6 +103,10 @@ static int parse_args(int argc, char *argv[])
                 break;
             case 'r':
                 sending_rate = parse_rate(optarg);
+                if(sending_rate < 0) {
+                    fprintf(stderr, "Invalid rate: %s\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -264,7 +268,6 @@ int client_main()
     }
 
     spacing = compute_spacing(sending_rate, 8 * packet_length);
-    printf("%ld\n", spacing);
 
     while(1) {
         struct timeval start;
@@ -283,8 +286,6 @@ int client_main()
         if(result < 0) {
             perror("sendto");
             exit(EXIT_FAILURE);
-        } else {
-            printf("Sent %d bytes.\n", result);
         }
 
         gettimeofday(&end, NULL);
