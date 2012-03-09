@@ -11,7 +11,11 @@
 
 #define PACKET_BUFFER_LEN 2048
 
+/*
+ * Measurement data sent in each UDP packet.
+ */
 struct packet_info {
+    uint32_t    session;
     uint32_t    seq;
     uint32_t    sent_sec;
     uint32_t    sent_usec;
@@ -35,12 +39,23 @@ enum {
     MODE_CLIENT,
 };
 
+/*
+ * Command-line arguments that control program behavior.
+ */
 static int mode = MODE_SERVER;
 static const char *server_addr = "127.0.0.1";
 static int server_port = 5005;
 static long packet_length = 1400;
 static long sending_rate = 1000000;
 
+/*
+ * Parse a null-terminated string specifying a bit rate.
+ *
+ * The expected format is a number followed by an optional multiplier suffix,
+ * G, M, or k.
+ *
+ * Returns a negative value on error.
+ */
 static long parse_rate(const char *rate_str)
 {
     char *end;
@@ -79,6 +94,11 @@ static void print_usage(const char *cmd)
     printf("Usage: %s <--server | --client> [--port <port>] [--length <bytes>] [--rate <rate[kMG]>]\n");
 }
 
+/*
+ * Parse the command-line arguments.
+ *
+ * Returns 0 on success or a negative value on failure.
+ */
 static int parse_args(int argc, char *argv[])
 {
     int opt;
@@ -105,7 +125,7 @@ static int parse_args(int argc, char *argv[])
                 sending_rate = parse_rate(optarg);
                 if(sending_rate < 0) {
                     fprintf(stderr, "Invalid rate: %s\n", optarg);
-                    exit(EXIT_FAILURE);
+                    return -1;
                 }
                 break;
             case 'h':
@@ -145,6 +165,8 @@ int main(int argc, char *argv[])
 {
     int result;
 
+    srand(time(0));
+
     result = parse_args(argc, argv);
     if(result < 0)
         exit(EXIT_FAILURE);
@@ -159,6 +181,9 @@ int main(int argc, char *argv[])
     return 0;
 }
 
+/*
+ * Server main function.
+ */
 int server_main()
 {
     char port_str[16];
@@ -181,26 +206,28 @@ int server_main()
     result = getaddrinfo(NULL, port_str, &hints, &addrinfo);
     if(result < 0) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(result));
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     sockfd = socket(addrinfo->ai_family, addrinfo->ai_socktype, addrinfo->ai_protocol);
     if(sockfd < 0) {
         perror("socket");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     result = bind(sockfd, addrinfo->ai_addr, addrinfo->ai_addrlen);
     if(result < 0) {
         perror("bind");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     buffer = malloc(buffer_len);
     if(!buffer) {
         fprintf(stderr, "Out of memory.\n");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
+
+    printf("receiver_time     session    sequence   bytes      sender_time\n");
 
     while(1) {
         struct sockaddr_storage from_addr;
@@ -210,17 +237,18 @@ int server_main()
                 (struct sockaddr *)&from_addr, &from_addr_len);
         if(result < 0) {
             perror("recvfrom");
-            exit(EXIT_FAILURE);
+            return EXIT_FAILURE;
         } else {
             struct packet_info *info = (struct packet_info *)buffer;
             struct timeval received;
 
             gettimeofday(&received, NULL);
 
-            printf("%9d.%06d %6u %6u %9d.%06d\n",
+            printf("%10d.%06d %-10u %-10u %-10u %10d.%06d\n",
                     received.tv_sec, received.tv_usec,
-                    result, ntohl(info->seq),
+                    ntohl(info->session), ntohl(info->seq), result,
                     ntohl(info->sent_sec), ntohl(info->sent_usec));
+            fflush(stdout);
         }
     }
 
@@ -230,6 +258,9 @@ int server_main()
     return 0;
 }
 
+/*
+ * Client main function.
+ */
 int client_main()
 {
     char port_str[16];
@@ -239,6 +270,7 @@ int client_main()
     char *buffer;
     long spacing;
     uint32_t next_seq = 0;
+    uint32_t session = htonl(rand());
 
     snprintf(port_str, sizeof(port_str), "%d", server_port);
 
@@ -252,19 +284,19 @@ int client_main()
     result = getaddrinfo(server_addr, port_str, &hints, &addrinfo);
     if(result < 0) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(result));
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     sockfd = socket(addrinfo->ai_family, addrinfo->ai_socktype, addrinfo->ai_protocol);
     if(sockfd < 0) {
         perror("socket");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     buffer = malloc(packet_length);
     if(!buffer) {
         fprintf(stderr, "Out of memory.\n");
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
     spacing = compute_spacing(sending_rate, 8 * packet_length);
@@ -277,6 +309,7 @@ int client_main()
         gettimeofday(&start, NULL);
 
         struct packet_info *info = (struct packet_info *)buffer;
+        info->session = session;
         info->seq = htonl(next_seq++);
         info->sent_sec = htonl(start.tv_sec);
         info->sent_usec = htonl(start.tv_usec);
@@ -285,7 +318,7 @@ int client_main()
                 addrinfo->ai_addr, addrinfo->ai_addrlen);
         if(result < 0) {
             perror("sendto");
-            exit(EXIT_FAILURE);
+            return EXIT_FAILURE;
         }
 
         gettimeofday(&end, NULL);
@@ -301,6 +334,5 @@ int client_main()
     freeaddrinfo(addrinfo);
     close(sockfd);
     return 0;
-
 }
 
