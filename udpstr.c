@@ -24,14 +24,15 @@ struct packet_info {
 const char *OPTSTRING = "SCr:h";
 
 const struct option LONGOPTS[] = {
-    {.name = "server",      .has_arg = 0,   .flag = 0,  .val = 'S'},
-    {.name = "client",      .has_arg = 0,   .flag = 0,  .val = 'C'},
-    {.name = "dest",        .has_arg = 1,   .flag = 0,  .val = 'd'},
-    {.name = "port",        .has_arg = 1,   .flag = 0,  .val = 'p'},
-    {.name = "length",      .has_arg = 1,   .flag = 0,  .val = 'l'},
-    {.name = "rate",        .has_arg = 1,   .flag = 0,  .val = 'r'},
-    {.name = "help",        .has_arg = 0,   .flag = 0,  .val = 'h'},
-    {.name = 0,             .has_arg = 0,   .flag = 0,  .val =  0},
+    {.name = "server",  .has_arg = 0,   .val = 'S'},
+    {.name = "client",  .has_arg = 0,   .val = 'C'},
+    {.name = "dest",    .has_arg = 1,   .val = 'd'},
+    {.name = "port",    .has_arg = 1,   .val = 'p'},
+    {.name = "length",  .has_arg = 1,   .val = 'l'},
+    {.name = "rate",    .has_arg = 1,   .val = 'r'},
+    {.name = "time",    .has_arg = 1,   .val = 't'},
+    {.name = "help",    .has_arg = 0,   .val = 'h'},
+    {.name = 0,         .has_arg = 0,   .val =  0},
 };
 
 enum {
@@ -44,9 +45,10 @@ enum {
  */
 static int mode = MODE_SERVER;
 static const char *server_addr = "127.0.0.1";
-static int server_port = 5005;
+static int server_port = 5050;
 static long packet_length = 1400;
 static long sending_rate = 1000000;
+static int time_limit = -1;
 
 /*
  * Parse a null-terminated string specifying a bit rate.
@@ -127,6 +129,9 @@ static int parse_args(int argc, char *argv[])
                     fprintf(stderr, "Invalid rate: %s\n", optarg);
                     return -1;
                 }
+                break;
+            case 't':
+                time_limit = atoi(optarg);
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -271,6 +276,7 @@ int client_main()
     long spacing;
     uint32_t next_seq = 0;
     uint32_t session = htonl(rand());
+    time_t stop_sending;
 
     snprintf(port_str, sizeof(port_str), "%d", server_port);
 
@@ -301,10 +307,15 @@ int client_main()
 
     spacing = compute_spacing(sending_rate, 8 * packet_length);
 
+    stop_sending = time(NULL) + time_limit;
+
     while(1) {
         struct timeval start;
         struct timeval end;
         long delay = spacing;
+
+        if(time_limit >= 0 && time(NULL) >= stop_sending)
+            break;
 
         gettimeofday(&start, NULL);
 
