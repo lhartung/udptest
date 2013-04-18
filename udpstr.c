@@ -123,7 +123,7 @@ static long parse_rate(const char *rate_str)
 
 static void print_usage(const char *cmd)
 {
-    printf("Usage: %s <mode> [options]\n");
+    printf("Usage: %s <mode> [options]\n", cmd);
     printf("\n");
     printf("Modes:\n");
     printf("  --server      Receiving server for upload test\n");
