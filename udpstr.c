@@ -617,7 +617,12 @@ int dserver_main()
                             memcpy(&client->addr, &from_addr, from_addr_len);
                             client->addr_len = from_addr_len;
 
-                            client->session = ntohl(info->session);
+                            /* Randomizing the session key is useful in the
+                             * case where the connection is interrupted for
+                             * longer than the timeout period, but the client
+                             * has not realized that.  It informs the client
+                             * that we have started a new session on our side. */
+                            client->session = ntohl(info->session) ^ rand();
                             client->next_seq = 0;
 
                             client->sockfd = sockfd;
