@@ -133,6 +133,9 @@ static long parse_rate(const char *rate_str)
 
 static void print_usage(const char *cmd)
 {
+    printf("udptest is a powerful UDP bandwidth testing tool.\n");
+    printf("Copyright (C) 2013 Lance Hartung\n");
+    printf("\n");
     printf("Usage: %s <mode> [options]\n", cmd);
     printf("\n");
     printf("Modes:\n");
@@ -145,9 +148,9 @@ static void print_usage(const char *cmd)
     printf("  --dest\n");
     printf("  --port\n");
     printf("  --length      Length of payload in data packets\n");
-    printf("  --rate        Target bit rate (optionally append number with suffix k, M, or G)\n");
+    printf("  --rate        Target bit rate (optionally append a suffix k, M, or G without a space)\n");
     printf("  --time        Time limit (in seconds)\n");
-    printf("  --key         Authentication key required for dserver/rclient\n");
+    printf("  --key         Authentication key to be used between dserver and dclient\n");
     printf("  --interval    Packet interval (overrides --rate)\n");
     printf("  --bind        Bind to device (super-user only)\n");
 }

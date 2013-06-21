@@ -1,6 +1,6 @@
-udpstr: udpstr.c
-	gcc -o udpstr udpstr.c -lpthread
+udptest: udptest.c
+	gcc -o udptest udptest.c -lpthread
 
 clean:
-	rm -f udpstr
+	rm -f udptest
 
