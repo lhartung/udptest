@@ -1,3 +1,5 @@
+#include <assert.h>
+#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -6,11 +8,11 @@
 #include <limits.h>
 #include <sched.h>
 #include <pthread.h>
-
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <netdb.h>
+#include <linux/if.h>
+#include <linux/if_ether.h>
 
 #include "uthash.h"
 
@@ -43,7 +45,7 @@ struct client_info {
     UT_hash_handle hh;
 };
 
-const char *OPTSTRING = "SCDRd:p:l:r:t:k:i:h";
+const char *OPTSTRING = "SCDRd:p:l:r:t:k:i:b:h";
 
 const struct option LONGOPTS[] = {
     {.name = "server",  .has_arg = 0, .val = 'S'},
@@ -57,6 +59,7 @@ const struct option LONGOPTS[] = {
     {.name = "time",    .has_arg = 1, .val = 't'},
     {.name = "key",     .has_arg = 1, .val = 'k'},
     {.name = "interval",.has_arg = 1, .val = 'i'},
+    {.name = "bind",    .has_arg = 1, .val = 'b'},
     {.name = "help",    .has_arg = 0, .val = 'h'},
     {.name = 0,         .has_arg = 0, .val =  0},
 };
@@ -71,7 +74,7 @@ enum {
 /*
  * Command-line arguments that control program behavior.
  */
-static int mode = MODE_SERVER;
+static int mode = -1;
 static const char *server_addr = "127.0.0.1";
 static int server_port = 5050;
 static long packet_length = 1400;
@@ -79,6 +82,7 @@ static long sending_rate = 1000000;
 static int time_limit = -1;
 static unsigned access_key = 0;
 static long packet_interval = -1;
+static const char *bind_device = NULL;
 
 /*
  * Parse a null-terminated string specifying a bit rate.
@@ -139,6 +143,7 @@ static void print_usage(const char *cmd)
     printf("  --time        Time limit (in seconds)\n");
     printf("  --key         Authentication key required for dserver/rclient\n");
     printf("  --interval    Packet interval (overrides --rate)\n");
+    printf("  --bind        Bind to device (super-user only)\n");
 }
 
 /*
@@ -190,6 +195,9 @@ static int parse_args(int argc, char *argv[])
                 break;
             case 'i':
                 packet_interval = strtol(optarg, NULL, 10);
+                break;
+            case 'b':
+                bind_device = optarg;
                 break;
             case 'h':
                 print_usage(command);
@@ -278,6 +286,11 @@ int main(int argc, char *argv[])
     if(result < 0)
         exit(EXIT_FAILURE);
 
+    if(mode < 0) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
     switch(mode) {
         case MODE_SERVER:
             return server_main();
@@ -287,6 +300,25 @@ int main(int argc, char *argv[])
             return dserver_main();
         case MODE_RCLIENT:
             return rclient_main();
+    }
+
+    return 0;
+}
+
+/*
+ * Bind a socket to a specified network device.
+ */
+static int socket_bind_device(int sockfd, const char *device)
+{
+    assert(device);
+
+    socklen_t option_len = strnlen(device, IFNAMSIZ);
+    if(setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, device, option_len) < 0) {
+        if(errno == EPERM || errno == EACCES)
+            fprintf(stderr, "Error: binding to %s failed with permission denied, must be run with super user\n", device);
+        else
+            perror("SO_BINDTODEVICE");
+        return -1;
     }
 
     return 0;
@@ -331,6 +363,9 @@ int server_main()
         perror("bind");
         return EXIT_FAILURE;
     }
+
+    if(bind_device)
+        socket_bind_device(sockfd, bind_device);
 
     buffer = malloc(buffer_len);
     if(!buffer) {
@@ -403,6 +438,9 @@ int client_main()
         perror("socket");
         return EXIT_FAILURE;
     }
+    
+    if(bind_device)
+        socket_bind_device(sockfd, bind_device);
 
     buffer = malloc(packet_length);
     if(!buffer) {
@@ -562,6 +600,9 @@ int dserver_main()
         perror("bind");
         return EXIT_FAILURE;
     }
+    
+    if(bind_device)
+        socket_bind_device(sockfd, bind_device);
 
     buffer = malloc(buffer_len);
     if(!buffer) {
@@ -690,6 +731,9 @@ int rclient_main()
         perror("socket");
         return EXIT_FAILURE;
     }
+    
+    if(bind_device)
+        socket_bind_device(sockfd, bind_device);
 
     buffer = malloc(packet_length);
     if(!buffer) {
