@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <sched.h>
 #include <pthread.h>
+#include <arpa/inet.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -18,6 +19,8 @@
 
 #define PACKET_BUFFER_LEN 2048
 #define USECS_PER_SEC 1000000
+
+#define DEFAULT_DCLIENT_INTERVAL    1000000
 
 /*
  * Measurement data sent in each UDP packet.
@@ -34,6 +37,9 @@ struct client_info {
     struct sockaddr_storage addr;
     socklen_t addr_len;
 
+    char addrstr[INET6_ADDRSTRLEN];
+    char portstr[6];
+
     time_t timeout;
 
     uint32_t session;
@@ -48,10 +54,10 @@ struct client_info {
 const char *OPTSTRING = "SCDRd:p:l:r:t:k:i:b:h";
 
 const struct option LONGOPTS[] = {
-    {.name = "server",  .has_arg = 0, .val = 'S'},
-    {.name = "client",  .has_arg = 0, .val = 'C'},
+    {.name = "userver", .has_arg = 0, .val = 'S'},
+    {.name = "uclient", .has_arg = 0, .val = 'C'},
     {.name = "dserver", .has_arg = 0, .val = 'D'},
-    {.name = "rclient", .has_arg = 0, .val = 'R'},
+    {.name = "dclient", .has_arg = 0, .val = 'R'},
     {.name = "dest",    .has_arg = 1, .val = 'd'},
     {.name = "port",    .has_arg = 1, .val = 'p'},
     {.name = "length",  .has_arg = 1, .val = 'l'},
@@ -65,10 +71,10 @@ const struct option LONGOPTS[] = {
 };
 
 enum {
-    MODE_SERVER,
-    MODE_CLIENT,
-    MODE_DSERVER,
-    MODE_RCLIENT,
+    MODE_UP_SERVER,
+    MODE_UP_CLIENT,
+    MODE_DOWN_SERVER,
+    MODE_DOWN_CLIENT,
 };
 
 /*
@@ -79,7 +85,7 @@ static const char *server_addr = "127.0.0.1";
 static int server_port = 5050;
 static long packet_length = 1400;
 static long sending_rate = 1000000;
-static int time_limit = -1;
+static int time_limit = 15;
 static unsigned access_key = 0;
 static long packet_interval = -1;
 static const char *bind_device = NULL;
@@ -130,10 +136,10 @@ static void print_usage(const char *cmd)
     printf("Usage: %s <mode> [options]\n", cmd);
     printf("\n");
     printf("Modes:\n");
-    printf("  --server      Receiving server for upload test\n");
-    printf("  --client      Sending client for upload test\n");
+    printf("  --userver     Receiving server for upload test\n");
+    printf("  --uclient     Sending client for upload test\n");
     printf("  --dserver     Sending server for download test\n");
-    printf("  --rclient     Receiving client for download test\n");
+    printf("  --dclient     Receiving client for download test\n");
     printf("\n");
     printf("Options:\n");
     printf("  --dest\n");
@@ -160,16 +166,16 @@ static int parse_args(int argc, char *argv[])
     while(opt > 0) {
         switch(opt) {
             case 'S':
-                mode = MODE_SERVER;
+                mode = MODE_UP_SERVER;
                 break;
             case 'C':
-                mode = MODE_CLIENT;
+                mode = MODE_UP_CLIENT;
                 break;
             case 'D':
-                mode = MODE_DSERVER;
+                mode = MODE_DOWN_SERVER;
                 break;
             case 'R':
-                mode = MODE_RCLIENT;
+                mode = MODE_DOWN_CLIENT;
                 break;
             case 'd':
                 server_addr = optarg;
@@ -292,14 +298,14 @@ int main(int argc, char *argv[])
     }
 
     switch(mode) {
-        case MODE_SERVER:
-            return server_main();
-        case MODE_CLIENT:
-            return client_main();
-        case MODE_DSERVER:
-            return dserver_main();
-        case MODE_RCLIENT:
-            return rclient_main();
+        case MODE_UP_SERVER:
+            return upload_server_main();
+        case MODE_UP_CLIENT:
+            return upload_client_main();
+        case MODE_DOWN_SERVER:
+            return download_server_main();
+        case MODE_DOWN_CLIENT:
+            return download_client_main();
     }
 
     return 0;
@@ -327,7 +333,7 @@ static int socket_bind_device(int sockfd, const char *device)
 /*
  * Server main function.
  */
-int server_main()
+int upload_server_main()
 {
     char port_str[16];
     int result;
@@ -373,7 +379,7 @@ int server_main()
         return EXIT_FAILURE;
     }
 
-    printf("receiver_time     session    sequence   bytes      sender_time\n");
+    printf("receiver_time     source_address  sport session    sequence   bytes      sender_time\n");
 
     while(1) {
         struct sockaddr_storage from_addr;
@@ -390,8 +396,17 @@ int server_main()
 
             gettimeofday(&received, NULL);
 
-            printf("%10d.%06d %-10u %-10u %-10u %10d.%06d\n",
+            char addrstr[INET6_ADDRSTRLEN];
+            char portstr[6];
+
+            getnameinfo((struct sockaddr *)&from_addr, from_addr_len, 
+                    addrstr, sizeof(addrstr), 
+                    portstr, sizeof(portstr),
+                    NI_NUMERICHOST | NI_NUMERICSERV);
+
+            printf("%10d.%06d %-15s %-5s %-10u %-10u %-10u %10d.%06d\n",
                     received.tv_sec, received.tv_usec,
+                    addrstr, portstr,
                     ntohl(info->session), ntohl(info->seq), result,
                     ntohl(info->sent_sec), ntohl(info->sent_usec));
             fflush(stdout);
@@ -407,7 +422,7 @@ int server_main()
 /*
  * Client main function.
  */
-int client_main()
+int upload_client_main()
 {
     char port_str[16];
     int result;
@@ -552,7 +567,7 @@ out:
  * Listens for packets from clients and responds by sending a UDP packet stream
  * to the client.
  */
-int dserver_main()
+int download_server_main()
 {
     char port_str[16];
     int result;
@@ -567,11 +582,6 @@ int dserver_main()
 
     if(time_limit < 0) {
         fprintf(stderr, "Warning: time_limit is not set, will send packets indefinitely.\n");
-    }
-
-    if(access_key == 0) {
-        access_key = rand();
-        fprintf(stderr, "The access key is: %u\n", access_key);
     }
 
     snprintf(port_str, sizeof(port_str), "%d", server_port);
@@ -610,7 +620,7 @@ int dserver_main()
         return EXIT_FAILURE;
     }
 
-    printf("local_time        session    next_seq  \n");
+    printf("local_time        source_address  sport session    next_seq  \n");
         
     struct timeval timeout;
     timeout.tv_sec = 1;
@@ -658,6 +668,11 @@ int dserver_main()
                             memcpy(&client->addr, &from_addr, from_addr_len);
                             client->addr_len = from_addr_len;
 
+                            getnameinfo((struct sockaddr *)&from_addr, from_addr_len, 
+                                    client->addrstr, sizeof(client->addrstr), 
+                                    client->portstr, sizeof(client->portstr),
+                                    NI_NUMERICHOST | NI_NUMERICSERV);
+
                             /* Randomizing the session key is useful in the
                              * case where the connection is interrupted for
                              * longer than the timeout period, but the client
@@ -679,8 +694,9 @@ int dserver_main()
                     if(client) {
                         client->timeout = time(NULL) + time_limit;
 
-                        printf("%10d.%06d %-10u %-10u\n",
+                        printf("%10d.%06d %-15s %-5s %-10u %-10u\n",
                                 received.tv_sec, received.tv_usec, 
+                                client->addrstr, client->portstr,
                                 client->session, client->next_seq);
                         fflush(stdout);
                     }
@@ -698,7 +714,7 @@ int dserver_main()
 /*
  * Receive Client main function.
  */
-int rclient_main()
+int download_client_main()
 {
     char port_str[16];
     int result;
@@ -742,7 +758,7 @@ int rclient_main()
     }
 
     if(packet_interval < 0)
-        packet_interval = 200000;
+        packet_interval = DEFAULT_DCLIENT_INTERVAL;
 
     stop_sending = time(NULL) + time_limit;
     
