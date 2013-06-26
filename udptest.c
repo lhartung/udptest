@@ -85,7 +85,7 @@ static const char *server_addr = "127.0.0.1";
 static int server_port = 5050;
 static long packet_length = 1400;
 static long sending_rate = 1000000;
-static int time_limit = 15;
+static int time_limit = -1;
 static unsigned access_key = 0;
 static long packet_interval = -1;
 static const char *bind_device = NULL;
@@ -149,7 +149,7 @@ static void print_usage(const char *cmd)
     printf("  --port\n");
     printf("  --length      Length of payload in data packets\n");
     printf("  --rate        Target bit rate (optionally append a suffix k, M, or G without a space)\n");
-    printf("  --time        Time limit (in seconds)\n");
+    printf("  --time        Time limit (in seconds, zero means no limit)\n");
     printf("  --key         Authentication key to be used between dserver and dclient\n");
     printf("  --interval    Packet interval (overrides --rate)\n");
     printf("  --bind        Bind to device (super-user only)\n");
@@ -198,6 +198,10 @@ static int parse_args(int argc, char *argv[])
                 break;
             case 't':
                 time_limit = atoi(optarg);
+                if(time_limit < 0) {
+                    fprintf(stderr, "Invalid time limit: %s\n", optarg);
+                    return -1;
+                }
                 break;
             case 'k':
                 access_key = atoi(optarg);
@@ -476,7 +480,7 @@ int upload_client_main()
         struct timeval end;
         long delay = packet_interval;
 
-        if(time_limit >= 0 && time(NULL) >= stop_sending)
+        if(time_limit > 0 && time(NULL) >= stop_sending)
             break;
 
         gettimeofday(&start, NULL);
@@ -529,7 +533,7 @@ static void *dserver_send(void *arg)
 
         gettimeofday(&start, NULL);
 
-        if(start.tv_sec > client->timeout)
+        if(time_limit > 0 && start.tv_sec > client->timeout)
             goto out;
 
         struct packet_info *info = (struct packet_info *)buffer;
@@ -583,8 +587,11 @@ int download_server_main()
     if(packet_interval < 0)
         packet_interval = compute_spacing(sending_rate, 8 * packet_length);
 
-    if(time_limit < 0) {
-        fprintf(stderr, "Warning: time_limit is not set, will send packets indefinitely.\n");
+    if(time_limit == 0) {
+        fprintf(stderr, "Warning: time_limit is set to zero, will send packets indefinitely.\n");
+    } else if(time_limit < 0) {
+        fprintf(stderr, "Warning: time_limit was not set, defaulting to 15 seconds.\n");
+        time_limit = 15;
     }
 
     snprintf(port_str, sizeof(port_str), "%d", server_port);
@@ -775,7 +782,7 @@ int download_client_main()
     gettimeofday(&next_send, NULL);
 
     while(1) {
-        if(time_limit >= 0 && time(NULL) >= stop_sending)
+        if(time_limit > 0 && time(NULL) >= stop_sending)
             break;
 
         struct sockaddr_storage from_addr;
