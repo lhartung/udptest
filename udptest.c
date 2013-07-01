@@ -846,7 +846,7 @@ int download_client_main()
         struct timeval now;
         gettimeofday(&now, NULL);
 
-        if(timercmp(&next_send, &now, <)) {
+        if(timercmp(&now, &next_send, <)) {
             timersub(&next_send, &now, &timeout);
         } else {
             timeout.tv_sec = 0;
