@@ -15,6 +15,7 @@
 #include <linux/if.h>
 #include <linux/if_ether.h>
 
+#include "rxbuff.h"
 #include "uthash.h"
 
 #define PACKET_BUFFER_LEN 2048
@@ -31,6 +32,7 @@ struct packet_info {
     uint32_t sent_sec;
     uint32_t sent_usec;
     uint32_t key;
+    uint32_t size;
 } __attribute__((__packed__));
 
 struct client_info {
@@ -51,7 +53,16 @@ struct client_info {
     UT_hash_handle hh;
 };
 
-const char *OPTSTRING = "SCDRd:p:l:r:t:k:i:b:h";
+enum {
+    MODE_UP_SERVER,
+    MODE_UP_CLIENT,
+    MODE_DOWN_SERVER,
+    MODE_DOWN_CLIENT,
+    MODE_TCP_DOWN_SERVER,
+    MODE_TCP_DOWN_CLIENT,
+};
+
+const char *OPTSTRING = "SCDRd:p:l:r:t:k:i:b:ch";
 
 const struct option LONGOPTS[] = {
     {.name = "userver", .has_arg = 0, .val = 'S'},
@@ -66,15 +77,11 @@ const struct option LONGOPTS[] = {
     {.name = "key",     .has_arg = 1, .val = 'k'},
     {.name = "interval",.has_arg = 1, .val = 'i'},
     {.name = "bind",    .has_arg = 1, .val = 'b'},
+    {.name = "csv",     .has_arg = 0, .val = 'c'},
     {.name = "help",    .has_arg = 0, .val = 'h'},
+    {.name = "tcp-dserver", .has_arg = 0, .val = MODE_TCP_DOWN_SERVER},
+    {.name = "tcp-dclient", .has_arg = 0, .val = MODE_TCP_DOWN_CLIENT},
     {.name = 0,         .has_arg = 0, .val =  0},
-};
-
-enum {
-    MODE_UP_SERVER,
-    MODE_UP_CLIENT,
-    MODE_DOWN_SERVER,
-    MODE_DOWN_CLIENT,
 };
 
 /*
@@ -89,6 +96,7 @@ static int time_limit = -1;
 static unsigned access_key = 0;
 static long packet_interval = -1;
 static const char *bind_device = NULL;
+static int csv_output = 0;
 
 /*
  * Parse a null-terminated string specifying a bit rate.
@@ -143,6 +151,8 @@ static void print_usage(const char *cmd)
     printf("  --uclient     Sending client for upload test\n");
     printf("  --dserver     Sending server for download test\n");
     printf("  --dclient     Receiving client for download test\n");
+    printf("  --tcp-dserver Sending server for download test\n");
+    printf("  --tcp-dclient Receiving client for download test\n");
     printf("\n");
     printf("Options:\n");
     printf("  --dest\n");
@@ -153,6 +163,7 @@ static void print_usage(const char *cmd)
     printf("  --key         Authentication key to be used between dserver and dclient\n");
     printf("  --interval    Packet interval (overrides --rate)\n");
     printf("  --bind        Bind to device (super-user only)\n");
+    printf("  --csv         Produce output in CSV format\n");
 }
 
 /*
@@ -211,6 +222,15 @@ static int parse_args(int argc, char *argv[])
                 break;
             case 'b':
                 bind_device = optarg;
+                break;
+            case MODE_TCP_DOWN_SERVER:
+                mode = MODE_TCP_DOWN_SERVER;
+                break;
+            case MODE_TCP_DOWN_CLIENT:
+                mode = MODE_TCP_DOWN_CLIENT;
+                break;
+            case 'c':
+                csv_output = 1;
                 break;
             case 'h':
                 print_usage(command);
@@ -313,6 +333,10 @@ int main(int argc, char *argv[])
             return download_server_main();
         case MODE_DOWN_CLIENT:
             return download_client_main();
+        case MODE_TCP_DOWN_SERVER:
+            return tcp_download_server_main();
+        case MODE_TCP_DOWN_CLIENT:
+            return tcp_download_client_main();
     }
 
     return 0;
@@ -386,7 +410,10 @@ int upload_server_main()
         return EXIT_FAILURE;
     }
 
-    printf("receiver_time     source_address  sport session    sequence   bytes      sender_time\n");
+    if(csv_output)
+        printf("receiver_time,source_address,sport,session,sequence,bytes,sender_time\n");
+    else
+        printf("receiver_time     source_address  sport session    sequence   bytes      sender_time\n");
 
     while(1) {
         struct sockaddr_storage from_addr;
@@ -411,11 +438,18 @@ int upload_server_main()
                     portstr, sizeof(portstr),
                     NI_NUMERICHOST | NI_NUMERICSERV);
 
-            printf("%10d.%06d %-15s %-5s %-10u %-10u %-10u %10d.%06d\n",
+            const char *format;
+            if(csv_output)
+                format = "%d.%06d,%s,%s,%u,%u,%u,%d.%06d\n";
+            else
+                format = "%10d.%06d %-15s %-5s %-10u %-10u %-10u %10d.%06d\n";
+
+            printf(format,
                     received.tv_sec, received.tv_usec,
                     addrstr, portstr,
                     ntohl(info->session), ntohl(info->seq), result,
                     ntohl(info->sent_sec), ntohl(info->sent_usec));
+
             fflush(stdout);
         }
     }
@@ -491,6 +525,7 @@ int upload_client_main()
         info->sent_sec = htonl(start.tv_sec);
         info->sent_usec = htonl(start.tv_usec);
         info->key = htonl(access_key);
+        info->size = htonl(packet_length);
 
         result = sendto(sockfd, buffer, packet_length, 0,
                 addrinfo->ai_addr, addrinfo->ai_addrlen);
@@ -542,6 +577,7 @@ static void *dserver_send(void *arg)
         info->sent_sec = htonl(start.tv_sec);
         info->sent_usec = htonl(start.tv_usec);
         info->key = htonl(access_key);
+        info->size = htonl(packet_length);
 
         int result = sendto(client->sockfd, buffer, packet_length, 0,
                 (struct sockaddr *)&client->addr, client->addr_len);
@@ -630,7 +666,10 @@ int download_server_main()
         return EXIT_FAILURE;
     }
 
-    printf("local_time        source_address  sport session    next_seq  \n");
+    if(csv_output)
+        printf("local_time,source_address,sport,session,next_seq\n");
+    else
+        printf("local_time        source_address  sport session    next_seq  \n");
         
     struct timeval timeout;
     timeout.tv_sec = 1;
@@ -704,7 +743,13 @@ int download_server_main()
                     if(client) {
                         client->timeout = time(NULL) + time_limit;
 
-                        printf("%10d.%06d %-15s %-5s %-10u %-10u\n",
+                        const char *format;
+                        if(csv_output)
+                            format = "%d.%06d,%s,%s,%u,%u";
+                        else
+                            format = "%10d.%06d %-15s %-5s %-10u %-10u\n";
+
+                        printf(format,
                                 received.tv_sec, received.tv_usec, 
                                 client->addrstr, client->portstr,
                                 client->session, client->next_seq);
@@ -772,7 +817,10 @@ int download_client_main()
 
     stop_sending = time(NULL) + time_limit;
     
-    printf("receiver_time     session    sequence   bytes      sender_time\n");
+    if(csv_output)
+        printf("receiver_time,session,sequence,bytes,sender_time\n");
+    else
+        printf("receiver_time     session    sequence   bytes      sender_time\n");
     
     struct timeval timeout;
     timeout.tv_sec = 0;
@@ -810,7 +858,13 @@ int download_client_main()
                 } else {
                     gettimeofday(&received, NULL);
 
-                    printf("%10d.%06d %-10u %-10u %-10u %10d.%06d\n",
+                    const char *format;
+                    if(csv_output)
+                        format = "%d.%06d,%u,%u,%u,%d.%06d\n";
+                    else
+                        format = "%10d.%06d %-10u %-10u %-10u %10d.%06d\n";
+
+                    printf(format,
                             received.tv_sec, received.tv_usec,
                             ntohl(info->session), ntohl(info->seq), result,
                             ntohl(info->sent_sec), ntohl(info->sent_usec));
@@ -829,6 +883,7 @@ int download_client_main()
             info->sent_sec = htonl(start.tv_sec);
             info->sent_usec = htonl(start.tv_usec);
             info->key = htonl(access_key);
+            info->size = htonl(packet_length);
 
             result = sendto(sockfd, buffer, sizeof(*info), 0,
                     addrinfo->ai_addr, addrinfo->ai_addrlen);
@@ -855,6 +910,311 @@ int download_client_main()
     }
 
     free(buffer);
+    freeaddrinfo(addrinfo);
+    close(sockfd);
+    return 0;
+}
+
+static void *tcp_dserver_send(void *arg)
+{
+    struct client_info *client = (struct client_info *)arg;
+
+    char *buffer = malloc(packet_length);
+    if(!buffer) {
+        fprintf(stderr, "Out of memory\n");
+        return NULL;
+    }
+
+    while(1) {
+        struct timeval start;
+        struct timeval end;
+        long delay = client->packet_interval;
+
+        gettimeofday(&start, NULL);
+
+        if(time_limit > 0 && start.tv_sec > client->timeout)
+            goto out;
+
+        struct packet_info *info = (struct packet_info *)buffer;
+        info->session = htonl(client->session);
+        info->seq = htonl(client->next_seq++);
+        info->sent_sec = htonl(start.tv_sec);
+        info->sent_usec = htonl(start.tv_usec);
+        info->key = htonl(access_key);
+        info->size = htonl(packet_length);
+
+        int result = send(client->sockfd, buffer, packet_length, MSG_NOSIGNAL);
+        if(result < 0) {
+            perror("send");
+            goto out;
+        }
+
+        gettimeofday(&end, NULL);
+
+        delay -= (end.tv_sec - start.tv_sec) * 1000000;
+        delay -= (end.tv_usec - start.tv_usec);
+
+        if(delay > 0)
+            usleep(delay);
+    }
+
+out:
+    free(buffer);
+    
+    HASH_DEL(clients, client);
+    free(client);
+
+    return NULL;
+}
+
+/*
+ * Download Server main function.
+ *
+ * Listens for packets from clients and responds by sending a UDP packet stream
+ * to the client.
+ */
+int tcp_download_server_main()
+{
+    char port_str[16];
+    int result;
+    int sockfd;
+    struct addrinfo *addrinfo;
+    char *buffer;
+    int buffer_len = packet_length > PACKET_BUFFER_LEN ?
+        packet_length : PACKET_BUFFER_LEN;
+
+    if(packet_interval < 0)
+        packet_interval = compute_spacing(sending_rate, 8 * packet_length);
+
+    if(time_limit == 0) {
+        fprintf(stderr, "Warning: time_limit is set to zero, will send packets indefinitely.\n");
+    } else if(time_limit < 0) {
+        fprintf(stderr, "Warning: time_limit was not set, defaulting to 15 seconds.\n");
+        time_limit = 15;
+    }
+
+    snprintf(port_str, sizeof(port_str), "%d", server_port);
+
+    const struct addrinfo hints = {
+        .ai_flags = AI_PASSIVE | AI_NUMERICSERV,
+        .ai_family = AF_UNSPEC,
+        .ai_socktype = SOCK_STREAM,
+        .ai_protocol = 0,
+    };
+
+    result = getaddrinfo(NULL, port_str, &hints, &addrinfo);
+    if(result < 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(result));
+        return EXIT_FAILURE;
+    }
+
+    sockfd = socket(addrinfo->ai_family, addrinfo->ai_socktype, addrinfo->ai_protocol);
+    if(sockfd < 0) {
+        perror("socket");
+        return EXIT_FAILURE;
+    }
+
+    result = bind(sockfd, addrinfo->ai_addr, addrinfo->ai_addrlen);
+    if(result < 0) {
+        perror("bind");
+        return EXIT_FAILURE;
+    }
+    
+    result = listen(sockfd, SOMAXCONN);
+    if(result < 0) {
+        perror("listen");
+        return EXIT_FAILURE;
+    }
+    
+    if(bind_device)
+        socket_bind_device(sockfd, bind_device);
+
+    buffer = malloc(buffer_len);
+    if(!buffer) {
+        fprintf(stderr, "Out of memory.\n");
+        return EXIT_FAILURE;
+    }
+
+    if(csv_output)
+        printf("local_time,source_address,sport,session,next_seq\n");
+    else
+        printf("local_time        source_address  sport session    next_seq  \n");
+        
+    struct timeval timeout;
+    timeout.tv_sec = 1;
+    timeout.tv_usec = 0;
+
+    while(1) {
+        struct sockaddr_storage from_addr;
+        socklen_t from_addr_len = sizeof(from_addr);
+
+        result = accept(sockfd, (struct sockaddr *)&from_addr, &from_addr_len);
+        if(result > 0) {
+            struct timeval received;
+            struct sockaddr_storage key;
+
+            gettimeofday(&received, NULL);
+
+            /* Copying the address this way ensures that the unused bytes are zero. */
+            memset(&key, 0, sizeof(key));
+            memcpy(&key, &from_addr, from_addr_len);
+
+            struct client_info *client = NULL;
+            client = malloc(sizeof(struct client_info));
+            if(!client) {
+                fprintf(stderr, "Out of memory\n");
+            } else {
+                memset(client, 0, sizeof(struct client_info));
+                memcpy(&client->addr, &from_addr, from_addr_len);
+                client->addr_len = from_addr_len;
+
+                getnameinfo((struct sockaddr *)&from_addr, from_addr_len, 
+                        client->addrstr, sizeof(client->addrstr), 
+                        client->portstr, sizeof(client->portstr),
+                        NI_NUMERICHOST | NI_NUMERICSERV);
+
+                /* Randomizing the session key is useful in the
+                 * case where the connection is interrupted for
+                 * longer than the timeout period, but the client
+                 * has not realized that.  It informs the client
+                 * that we have started a new session on our side. */
+                client->session = rand();
+                client->next_seq = 0;
+
+                client->sockfd = result;
+                client->packet_interval = packet_interval;
+                
+                client->timeout = time(NULL) + time_limit;
+
+                HASH_ADD(hh, clients, addr, sizeof(client->addr), client);
+
+                pthread_t thread;
+                pthread_create(&thread, NULL, tcp_dserver_send, client);
+            }
+        }
+    }
+
+    free(buffer);
+    freeaddrinfo(addrinfo);
+    close(sockfd);
+    return 0;
+}
+
+/*
+ * Receive Client main function.
+ */
+int tcp_download_client_main()
+{
+    char port_str[16];
+    int result;
+    int sockfd;
+    struct addrinfo *addrinfo;
+    int buffer_len = packet_length > PACKET_BUFFER_LEN ?
+        packet_length : PACKET_BUFFER_LEN;
+    uint32_t next_seq = 0;
+    uint32_t session = htonl(rand());
+    time_t stop_sending;
+
+    snprintf(port_str, sizeof(port_str), "%d", server_port);
+
+    const struct addrinfo hints = {
+        .ai_flags = AI_NUMERICSERV,
+        .ai_family = AF_UNSPEC,
+        .ai_socktype = SOCK_STREAM,
+        .ai_protocol = 0,
+    };
+
+    result = getaddrinfo(server_addr, port_str, &hints, &addrinfo);
+    if(result < 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(result));
+        return EXIT_FAILURE;
+    }
+
+    sockfd = socket(addrinfo->ai_family, addrinfo->ai_socktype, addrinfo->ai_protocol);
+    if(sockfd < 0) {
+        perror("socket");
+        return EXIT_FAILURE;
+    }
+    
+    if(bind_device)
+        socket_bind_device(sockfd, bind_device);
+
+    result = connect(sockfd, addrinfo->ai_addr, addrinfo->ai_addrlen);
+    if(result < 0) {
+        perror("connect");
+        return EXIT_FAILURE;
+    }
+
+    if(packet_interval < 0)
+        packet_interval = DEFAULT_DCLIENT_INTERVAL;
+
+    stop_sending = time(NULL) + time_limit;
+    
+    if(csv_output)
+        printf("receiver_time,session,sequence,bytes,sender_time\n");
+    else
+        printf("receiver_time     session    sequence   bytes      sender_time\n");
+    
+    struct timeval timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+
+    struct timeval next_send;
+    gettimeofday(&next_send, NULL);
+
+    struct rxbuff rxbuff;
+    rxbuff_init(&rxbuff, buffer_len);
+
+    while(1) {
+        if(time_limit > 0 && time(NULL) >= stop_sending)
+            break;
+
+        result = recv(sockfd, rxbuff.write_buff, rxbuff.write_space, 0);
+        if(result < 0) {
+            perror("recv");
+            return EXIT_FAILURE;
+        }
+
+        rxbuff_commit_write(&rxbuff, result);
+
+        while(rxbuff.read_avail >= sizeof(struct packet_info)) {
+            struct packet_info *info = (struct packet_info *)rxbuff.read_buff;
+            struct timeval received;
+            struct sockaddr_storage key;
+
+            if(ntohl(info->key) != access_key) {
+                fprintf(stderr, "Sender access key (%u) is incorrect.\n",
+                        ntohl(info->key));
+            } else {
+                int size = ntohl(info->size);
+                if(size < sizeof(struct packet_info)) {
+                    fprintf(stderr, "Bad\n");
+                    return EXIT_FAILURE;
+                }
+
+                if(rxbuff.read_avail >= size) {
+                    gettimeofday(&received, NULL);
+
+                    const char *format;
+                    if(csv_output)
+                        format = "%d.%06d,%u,%u,%u,%d.%06d\n";
+                    else
+                        format = "%10d.%06d %-10u %-10u %-10u %10d.%06d\n";
+
+                    printf(format,
+                            received.tv_sec, received.tv_usec,
+                            ntohl(info->session), ntohl(info->seq), size,
+                            ntohl(info->sent_sec), ntohl(info->sent_usec));
+                    fflush(stdout);
+
+                    rxbuff_commit_read(&rxbuff, size);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
     freeaddrinfo(addrinfo);
     close(sockfd);
     return 0;
