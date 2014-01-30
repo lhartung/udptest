@@ -962,6 +962,7 @@ out:
     free(buffer);
     
     HASH_DEL(clients, client);
+    close(client->sockfd);
     free(client);
 
     return NULL;
