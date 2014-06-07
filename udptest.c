@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,6 +79,8 @@ const struct option LONGOPTS[] = {
     {.name = "interval",.has_arg = 1, .val = 'i'},
     {.name = "bind",    .has_arg = 1, .val = 'b'},
     {.name = "csv",     .has_arg = 0, .val = 'c'},
+    {.name = "connect-timeout", .has_arg = 1, .val = 'n'},
+    {.name = "timeout", .has_arg = 1, .val = 'o'},
     {.name = "help",    .has_arg = 0, .val = 'h'},
     {.name = "tcp-dserver", .has_arg = 0, .val = MODE_TCP_DOWN_SERVER},
     {.name = "tcp-dclient", .has_arg = 0, .val = MODE_TCP_DOWN_CLIENT},
@@ -96,6 +99,8 @@ static int time_limit = -1;
 static unsigned access_key = 0;
 static long packet_interval = -1;
 static const char *bind_device = NULL;
+static long connect_timeout = -1;
+static long data_timeout = -1;
 static int csv_output = 0;
 
 /*
@@ -163,6 +168,8 @@ static void print_usage(const char *cmd)
     printf("  --key         Authentication key to be used between dserver and dclient\n");
     printf("  --interval    Packet interval (overrides --rate)\n");
     printf("  --bind        Bind to device (super-user only)\n");
+    printf("  --connect-timeout     Timeout (seconds) for establishing TCP connection\n");
+    printf("  --timeout     Timeout (seconds) for receiving data\n");
     printf("  --csv         Produce output in CSV format\n");
 }
 
@@ -228,6 +235,12 @@ static int parse_args(int argc, char *argv[])
                 break;
             case MODE_TCP_DOWN_CLIENT:
                 mode = MODE_TCP_DOWN_CLIENT;
+                break;
+            case 'n':
+                connect_timeout = strtol(optarg, NULL, 10);
+                break;
+            case 'o':
+                data_timeout = strtol(optarg, NULL, 10);
                 break;
             case 'c':
                 csv_output = 1;
@@ -1102,6 +1115,55 @@ int tcp_download_server_main()
 }
 
 /*
+ * If timeout is null, there is no timeout or it is the OS-implemented timeout.
+ *
+ * Side effect: if timeout is not null, sockfd will be set to non-blocking.
+ */
+int tcp_connect_timeout(int sockfd, struct sockaddr *addr, socklen_t addrlen,
+        struct timeval *timeout)
+{
+    int result;
+
+    if(timeout) {
+        int flags = fcntl(sockfd, F_GETFL, 0);
+        if(flags == -1) {
+            perror("fcntl F_GETFL");
+            return EXIT_FAILURE;
+        }
+
+        flags |= O_NONBLOCK;
+        if(fcntl(sockfd, F_SETFL, flags) == -1) {
+            perror("fcntl F_SETFL");
+            return EXIT_FAILURE;
+        }
+    }
+
+    result = connect(sockfd, addr, addrlen);
+    if(result < 0 && errno != EINPROGRESS) {
+        perror("connect");
+        return EXIT_FAILURE;
+    }
+
+    if(timeout) {
+        fd_set write_set;
+        FD_ZERO(&write_set);
+        FD_SET(sockfd, &write_set);
+
+        result = select(sockfd+1, NULL, &write_set, NULL, timeout);
+        if(result < 0) {
+            if(errno != EINTR)
+                perror("select");
+            return EXIT_FAILURE;
+        } else if(result == 0) {
+            // Timed out.
+            return EXIT_FAILURE;
+        }
+    }
+
+    return 0;
+}
+
+/*
  * Receive Client main function.
  */
 int tcp_download_client_main()
@@ -1140,11 +1202,19 @@ int tcp_download_client_main()
     if(bind_device)
         socket_bind_device(sockfd, bind_device);
 
-    result = connect(sockfd, addrinfo->ai_addr, addrinfo->ai_addrlen);
-    if(result < 0) {
-        perror("connect");
-        return EXIT_FAILURE;
+    struct timeval timeout;
+    struct timeval *ptimeout = NULL;
+
+    if(connect_timeout > 0) {
+        timeout.tv_sec = connect_timeout;
+        timeout.tv_usec = 0;
+        ptimeout = &timeout;
     }
+
+    result = tcp_connect_timeout(sockfd, addrinfo->ai_addr, 
+            addrinfo->ai_addrlen, ptimeout);
+    if(result == EXIT_FAILURE)
+        return EXIT_FAILURE;
 
     if(packet_interval < 0)
         packet_interval = DEFAULT_DCLIENT_INTERVAL;
@@ -1156,61 +1226,77 @@ int tcp_download_client_main()
     else
         printf("receiver_time     session    sequence   bytes      sender_time\n");
     
-    struct timeval timeout;
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 0;
-
     struct timeval next_send;
     gettimeofday(&next_send, NULL);
 
     struct rxbuff rxbuff;
     rxbuff_init(&rxbuff, buffer_len);
 
+    ptimeout = NULL;
+
     while(1) {
+        fd_set read_set;
+        FD_ZERO(&read_set);
+        FD_SET(sockfd, &read_set);
+
+        if(data_timeout > 0) {
+            timeout.tv_sec = data_timeout;
+            timeout.tv_usec = 0;
+            ptimeout = &timeout;
+        }
+
         if(time_limit > 0 && time(NULL) >= stop_sending)
             break;
 
-        result = recv(sockfd, rxbuff.write_buff, rxbuff.write_space, 0);
+        result = select(sockfd+1, &read_set, NULL, NULL, ptimeout);
         if(result < 0) {
-            perror("recv");
+            perror("select");
             return EXIT_FAILURE;
-        }
+        } else if(result == 0) {
+            return EXIT_FAILURE;
+        } else {
+            result = recv(sockfd, rxbuff.write_buff, rxbuff.write_space, 0);
+            if(result < 0) {
+                perror("recv");
+                return EXIT_FAILURE;
+            }
 
-        rxbuff_commit_write(&rxbuff, result);
+            rxbuff_commit_write(&rxbuff, result);
 
-        while(rxbuff.read_avail >= sizeof(struct packet_info)) {
-            struct packet_info *info = (struct packet_info *)rxbuff.read_buff;
-            struct timeval received;
-            struct sockaddr_storage key;
+            while(rxbuff.read_avail >= sizeof(struct packet_info)) {
+                struct packet_info *info = (struct packet_info *)rxbuff.read_buff;
+                struct timeval received;
+                struct sockaddr_storage key;
 
-            if(ntohl(info->key) != access_key) {
-                fprintf(stderr, "Sender access key (%u) is incorrect.\n",
-                        ntohl(info->key));
-            } else {
-                int size = ntohl(info->size);
-                if(size < sizeof(struct packet_info)) {
-                    fprintf(stderr, "Bad\n");
-                    return EXIT_FAILURE;
-                }
-
-                if(rxbuff.read_avail >= size) {
-                    gettimeofday(&received, NULL);
-
-                    const char *format;
-                    if(csv_output)
-                        format = "%d.%06d,%u,%u,%u,%d.%06d\n";
-                    else
-                        format = "%10d.%06d %-10u %-10u %-10u %10d.%06d\n";
-
-                    printf(format,
-                            received.tv_sec, received.tv_usec,
-                            ntohl(info->session), ntohl(info->seq), size,
-                            ntohl(info->sent_sec), ntohl(info->sent_usec));
-                    fflush(stdout);
-
-                    rxbuff_commit_read(&rxbuff, size);
+                if(ntohl(info->key) != access_key) {
+                    fprintf(stderr, "Sender access key (%u) is incorrect.\n",
+                            ntohl(info->key));
                 } else {
-                    break;
+                    int size = ntohl(info->size);
+                    if(size < sizeof(struct packet_info)) {
+                        fprintf(stderr, "Bad\n");
+                        return EXIT_FAILURE;
+                    }
+
+                    if(rxbuff.read_avail >= size) {
+                        gettimeofday(&received, NULL);
+
+                        const char *format;
+                        if(csv_output)
+                            format = "%d.%06d,%u,%u,%u,%d.%06d\n";
+                        else
+                            format = "%10d.%06d %-10u %-10u %-10u %10d.%06d\n";
+
+                        printf(format,
+                                received.tv_sec, received.tv_usec,
+                                ntohl(info->session), ntohl(info->seq), size,
+                                ntohl(info->sent_sec), ntohl(info->sent_usec));
+                        fflush(stdout);
+
+                        rxbuff_commit_read(&rxbuff, size);
+                    } else {
+                        break;
+                    }
                 }
             }
         }
