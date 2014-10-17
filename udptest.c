@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <fcntl.h>
+#include <math.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +35,7 @@ struct packet_info {
     uint32_t sent_usec;
     uint32_t key;
     uint32_t size;
+    uint32_t delay; // time (usec) since previous send
 } __attribute__((__packed__));
 
 struct client_info {
@@ -146,7 +148,7 @@ static long parse_rate(const char *rate_str)
 
 static void print_usage(const char *cmd)
 {
-    printf("udptest is a powerful UDP bandwidth testing tool.\n");
+    printf("udptest is a featureful UDP+TCP bandwidth testing tool.\n");
     printf("Copyright (C) 2013 Lance Hartung\n");
     printf("\n");
     printf("Usage: %s <mode> [options]\n", cmd);
@@ -264,18 +266,19 @@ static int parse_args(int argc, char *argv[])
  * Compute packet spacing to achieve desired rate.
  * rate in bits/second, length in bits, spacing in microseconds.
  */
-static long compute_spacing(long rate, long length)
+long compute_spacing(long rate, long length)
 {
-    if(length < LONG_MAX / 1000000) {
-        long spacing_usecs = (1000000 * length) / rate;
-        return spacing_usecs;
-    } else if(length < LONG_MAX / 1000) {
-        long spacing_msecs = (1000 * length) / rate;
-        return (1000 * spacing_msecs);
-    } else {
-        long spacing_secs = length / rate;
-        return (1000000 * spacing_secs);
-    }
+    double spacing = (double)length / (double)rate;
+    return (long)round(1000000.0 * spacing);
+}
+
+/*
+ * Compute (a - b) in microseconds.
+ */
+long timeval_diff(const struct timeval *a, const struct timeval *b)
+{
+    return (a->tv_sec - b->tv_sec) * USECS_PER_SEC +
+           (a->tv_usec - b->tv_usec);
 }
 
 /*
@@ -424,9 +427,9 @@ int upload_server_main()
     }
 
     if(csv_output)
-        printf("receiver_time,source_address,sport,session,sequence,bytes,sender_time\n");
+        printf("receiver_time,source_address,sport,session,sequence,bytes,sender_time,delay\n");
     else
-        printf("receiver_time     source_address  sport session    sequence   bytes      sender_time\n");
+        printf("receiver_time     source_address  sport session    sequence   bytes      sender_time       delay \n");
 
     while(1) {
         struct sockaddr_storage from_addr;
@@ -453,15 +456,16 @@ int upload_server_main()
 
             const char *format;
             if(csv_output)
-                format = "%d.%06d,%s,%s,%u,%u,%u,%d.%06d\n";
+                format = "%d.%06d,%s,%s,%u,%u,%u,%d.%06d,%u\n";
             else
-                format = "%10d.%06d %-15s %-5s %-10u %-10u %-10u %10d.%06d\n";
+                format = "%10d.%06d %-15s %-5s %-10u %-10u %-10u %10d.%06d %-6u\n";
 
             printf(format,
                     received.tv_sec, received.tv_usec,
                     addrstr, portstr,
                     ntohl(info->session), ntohl(info->seq), result,
-                    ntohl(info->sent_sec), ntohl(info->sent_usec));
+                    ntohl(info->sent_sec), ntohl(info->sent_usec),
+                    ntohl(info->delay));
 
             fflush(stdout);
         }
@@ -521,16 +525,22 @@ int upload_client_main()
         packet_interval = compute_spacing(sending_rate, 8 * packet_length);
 
     stop_sending = time(NULL) + time_limit;
+        
+    struct timeval start;
+    struct timeval end;
+    gettimeofday(&end, NULL);
 
     while(1) {
-        struct timeval start;
-        struct timeval end;
         long delay = packet_interval;
 
         if(time_limit > 0 && time(NULL) >= stop_sending)
             break;
 
         gettimeofday(&start, NULL);
+
+        long diff = timeval_diff(&start, &end);
+        if(diff > UINT32_MAX)
+            diff = UINT32_MAX;
 
         struct packet_info *info = (struct packet_info *)buffer;
         info->session = session;
@@ -539,6 +549,7 @@ int upload_client_main()
         info->sent_usec = htonl(start.tv_usec);
         info->key = htonl(access_key);
         info->size = htonl(packet_length);
+        info->delay = htonl((uint32_t)diff);
 
         result = sendto(sockfd, buffer, packet_length, 0,
                 addrinfo->ai_addr, addrinfo->ai_addrlen);
@@ -549,8 +560,7 @@ int upload_client_main()
 
         gettimeofday(&end, NULL);
 
-        delay -= (end.tv_sec - start.tv_sec) * 1000000;
-        delay -= (end.tv_usec - start.tv_usec);
+        delay -= timeval_diff(&end, &start);
         
         if(delay > 0)
             usleep(delay);
@@ -573,13 +583,19 @@ static void *dserver_send(void *arg)
         fprintf(stderr, "Out of memory\n");
         return NULL;
     }
+    
+    struct timeval start;
+    struct timeval end;
+    gettimeofday(&end, NULL);
 
     while(1) {
-        struct timeval start;
-        struct timeval end;
         long delay = client->packet_interval;
 
         gettimeofday(&start, NULL);
+        
+        long diff = timeval_diff(&start, &end);
+        if(diff > UINT32_MAX)
+            diff = UINT32_MAX;
 
         if(time_limit > 0 && start.tv_sec > client->timeout)
             goto out;
@@ -591,6 +607,7 @@ static void *dserver_send(void *arg)
         info->sent_usec = htonl(start.tv_usec);
         info->key = htonl(access_key);
         info->size = htonl(packet_length);
+        info->delay = htonl((uint32_t)diff);
 
         int result = sendto(client->sockfd, buffer, packet_length, 0,
                 (struct sockaddr *)&client->addr, client->addr_len);
@@ -601,8 +618,7 @@ static void *dserver_send(void *arg)
 
         gettimeofday(&end, NULL);
 
-        delay -= (end.tv_sec - start.tv_sec) * 1000000;
-        delay -= (end.tv_usec - start.tv_usec);
+        delay -= timeval_diff(&end, &start);
 
         if(delay > 0)
             usleep(delay);
@@ -831,9 +847,9 @@ int download_client_main()
     stop_sending = time(NULL) + time_limit;
     
     if(csv_output)
-        printf("receiver_time,session,sequence,bytes,sender_time\n");
+        printf("receiver_time,session,sequence,bytes,sender_time,delay\n");
     else
-        printf("receiver_time     session    sequence   bytes      sender_time\n");
+        printf("receiver_time     session    sequence   bytes      sender_time       delay \n");
     
     struct timeval timeout;
     timeout.tv_sec = 0;
@@ -873,14 +889,15 @@ int download_client_main()
 
                     const char *format;
                     if(csv_output)
-                        format = "%d.%06d,%u,%u,%u,%d.%06d\n";
+                        format = "%d.%06d,%u,%u,%u,%d.%06d,%u\n";
                     else
-                        format = "%10d.%06d %-10u %-10u %-10u %10d.%06d\n";
+                        format = "%10d.%06d %-10u %-10u %-10u %10d.%06d %-6u\n";
 
                     printf(format,
                             received.tv_sec, received.tv_usec,
                             ntohl(info->session), ntohl(info->seq), result,
-                            ntohl(info->sent_sec), ntohl(info->sent_usec));
+                            ntohl(info->sent_sec), ntohl(info->sent_usec),
+                            ntohl(info->delay));
                     fflush(stdout);
                 }
             }
@@ -897,6 +914,7 @@ int download_client_main()
             info->sent_usec = htonl(start.tv_usec);
             info->key = htonl(access_key);
             info->size = htonl(packet_length);
+            info->delay = htonl(packet_interval); // TODO: Measure the actual time since last send.
 
             result = sendto(sockfd, buffer, sizeof(*info), 0,
                     addrinfo->ai_addr, addrinfo->ai_addrlen);
@@ -937,13 +955,19 @@ static void *tcp_dserver_send(void *arg)
         fprintf(stderr, "Out of memory\n");
         return NULL;
     }
+    
+    struct timeval start;
+    struct timeval end;
+    gettimeofday(&end, NULL);
 
     while(1) {
-        struct timeval start;
-        struct timeval end;
         long delay = client->packet_interval;
 
         gettimeofday(&start, NULL);
+        
+        long diff = timeval_diff(&start, &end);
+        if(diff > UINT32_MAX)
+            diff = UINT32_MAX;
 
         if(time_limit > 0 && start.tv_sec > client->timeout)
             goto out;
@@ -955,6 +979,7 @@ static void *tcp_dserver_send(void *arg)
         info->sent_usec = htonl(start.tv_usec);
         info->key = htonl(access_key);
         info->size = htonl(packet_length);
+        info->delay = htonl((uint32_t)diff);
 
         int result = send(client->sockfd, buffer, packet_length, MSG_NOSIGNAL);
         if(result < 0) {
@@ -964,8 +989,7 @@ static void *tcp_dserver_send(void *arg)
 
         gettimeofday(&end, NULL);
 
-        delay -= (end.tv_sec - start.tv_sec) * 1000000;
-        delay -= (end.tv_usec - start.tv_usec);
+        delay -= timeval_diff(&end, &start);
 
         if(delay > 0)
             usleep(delay);
@@ -1222,9 +1246,9 @@ int tcp_download_client_main()
     stop_sending = time(NULL) + time_limit;
     
     if(csv_output)
-        printf("receiver_time,session,sequence,bytes,sender_time\n");
+        printf("receiver_time,session,sequence,bytes,sender_time,delay\n");
     else
-        printf("receiver_time     session    sequence   bytes      sender_time\n");
+        printf("receiver_time     session    sequence   bytes      sender_time       delay \n");
     
     struct timeval next_send;
     gettimeofday(&next_send, NULL);
@@ -1283,14 +1307,15 @@ int tcp_download_client_main()
 
                         const char *format;
                         if(csv_output)
-                            format = "%d.%06d,%u,%u,%u,%d.%06d\n";
+                            format = "%d.%06d,%u,%u,%u,%d.%06d,%u\n";
                         else
-                            format = "%10d.%06d %-10u %-10u %-10u %10d.%06d\n";
+                            format = "%10d.%06d %-10u %-10u %-10u %10d.%06d %-6u\n";
 
                         printf(format,
                                 received.tv_sec, received.tv_usec,
                                 ntohl(info->session), ntohl(info->seq), size,
-                                ntohl(info->sent_sec), ntohl(info->sent_usec));
+                                ntohl(info->sent_sec), ntohl(info->sent_usec),
+                                ntohl(info->delay));
                         fflush(stdout);
 
                         rxbuff_commit_read(&rxbuff, size);
