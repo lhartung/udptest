@@ -906,7 +906,7 @@ int download_client_main()
     if(bind_device)
         socket_bind_device(sockfd, bind_device);
 
-    buffer = malloc(packet_length);
+    buffer = malloc(buffer_len);
     if(!buffer) {
         fprintf(stderr, "Out of memory.\n");
         return EXIT_FAILURE;
