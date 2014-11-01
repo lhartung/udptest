@@ -30,7 +30,8 @@ tsval_t timespec_diff(const struct timespec *a, const struct timespec *b)
 
 void timespec_add(struct timespec *a, tsval_t amount)
 {
-    assert(amount >= 0);
+    assert(a->tv_nsec >= 0);
+    assert(a->tv_nsec < NSECS_PER_SEC);
 #if defined(__LP64__)
     a->tv_sec += amount / NSECS_PER_SEC;
     a->tv_nsec += amount % NSECS_PER_SEC;
@@ -38,6 +39,13 @@ void timespec_add(struct timespec *a, tsval_t amount)
     a->tv_sec += amount / USECS_PER_SEC;
     a->tv_nsec += NSECS_PER_USEC * (amount % USECS_PER_SEC);
 #endif
+    if (a->tv_nsec < 0) {
+        a->tv_sec--;
+        a->tv_nsec += NSECS_PER_SEC;
+    } else if (a->tv_nsec >= NSECS_PER_SEC) {
+        a->tv_sec++;
+        a->tv_nsec -= NSECS_PER_SEC;
+    }
     assert(a->tv_nsec >= 0);
     assert(a->tv_nsec < NSECS_PER_SEC);
 }

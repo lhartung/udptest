@@ -56,7 +56,7 @@ struct client_info {
     uint32_t next_seq;
 
     int sockfd;
-    long packet_interval;
+    tsval_t packet_interval;
 
     UT_hash_handle hh;
 };
@@ -917,7 +917,9 @@ int download_client_main()
 
     struct timespec stop_time;
     clock_gettime(CLOCK_REALTIME, &stop_time);
-    timespec_add(&stop_time, time_limit);
+
+    if (time_limit > 0)
+        timespec_add(&stop_time, time_limit);
     
     const char *format;
     if(csv_output) {
@@ -996,11 +998,8 @@ int download_client_main()
                 perror("sendto");
             }
 
-            next_send.tv_sec = start.tv_sec;
-            next_send.tv_nsec = start.tv_nsec + packet_interval * NSECS_PER_USEC;
-
-            next_send.tv_sec += next_send.tv_nsec / NSECS_PER_SEC;
-            next_send.tv_nsec %= NSECS_PER_SEC;
+            memcpy(&next_send, &start, sizeof(next_send));
+            timespec_add(&next_send, packet_interval);
         }
 
         clock_gettime(CLOCK_REALTIME, &now);
